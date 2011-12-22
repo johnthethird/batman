@@ -1228,17 +1228,20 @@ class Batman.Set extends Batman.Object
 
   toJSON: @::toArray
 
-  @accessor 'indexedBy', -> new Batman.TerminalAccessible (key) => @indexedBy(key)
-  @accessor 'indexedByUnique', -> new Batman.TerminalAccessible (key) => @indexedByUnique(key)
-  @accessor 'sortedBy',  -> new Batman.TerminalAccessible (key) => @sortedBy(key)
-  @accessor 'sortedByDescending', -> new Batman.TerminalAccessible (key) => @sortedBy(key, 'desc')
-  @accessor 'isEmpty', -> @isEmpty()
-  @accessor 'toArray', -> @toArray()
-  @accessor 'length', ->
+applySetAccessors = (klass) ->
+  klass.accessor 'first', -> @toArray()[0]
+  klass.accessor 'last',  -> @toArray()[@length - 1]
+  klass.accessor 'indexedBy',          -> new Batman.TerminalAccessible (key) => @indexedBy(key)
+  klass.accessor 'indexedByUnique',    -> new Batman.TerminalAccessible (key) => @indexedByUnique(key)
+  klass.accessor 'sortedBy',           -> new Batman.TerminalAccessible (key) => @sortedBy(key)
+  klass.accessor 'sortedByDescending', -> new Batman.TerminalAccessible (key) => @sortedBy(key, 'desc')
+  klass.accessor 'isEmpty', -> @isEmpty()
+  klass.accessor 'toArray', -> @toArray()
+  klass.accessor 'length',  ->
     @registerAsMutableSource()
     @length
-  @accessor 'first', -> @toArray()[0]
-  @accessor 'last', -> @toArray()[@length - 1]
+
+applySetAccessors(Batman.Set)
 
 class Batman.SetObserver extends Batman.Object
   constructor: (@base) ->
@@ -1283,6 +1286,8 @@ class Batman.SetProxy extends Batman.Object
   constructor: () ->
     super()
     @length = 0
+    @base.on 'itemsWereAdded', (items...) => @fire('itemsWereAdded', items...)
+    @base.on 'itemsWereRemoved', (items...) => @fire('itemsWereRemoved', items...)
 
   $extendsEnumerable(@::)
 
@@ -1297,20 +1302,17 @@ class Batman.SetProxy extends Batman.Object
         @length = @set('length', @base.get 'length')
         results
 
-  for k in ['has', 'merge', 'toArray', 'isEmpty']
+  for k in ['has', 'merge', 'toArray', 'isEmpty', 'indexedBy', 'indexedByUnique', 'sortedBy']
     do (k) =>
       @::[k] = -> @base[k](arguments...)
 
-  for k in ['isEmpty', 'toArray']
-    do (k) =>
-      @accessor k, -> @base.get(k)
+  applySetAccessors(@)
 
-  @accessor 'length'
+  @accessor 'length',
     get: ->
       @registerAsMutableSource()
       @length
-    set: (k, v) ->
-      @length = v
+    set: (_, v) -> @length = v
 
 class Batman.SetSort extends Batman.SetProxy
   constructor: (@base, @key, order="asc") ->
@@ -1328,7 +1330,6 @@ class Batman.SetSort extends Batman.SetProxy
   startObserving: -> @_setObserver?.startObserving()
   stopObserving: -> @_setObserver?.stopObserving()
   toArray: -> @get('_storage')
-  @accessor 'toArray', @::toArray
   forEach: (iterator, ctx) -> iterator.call(ctx,e,i,this) for e,i in @get('_storage')
   compare: (a,b) ->
     return 0 if a is b
@@ -2064,15 +2065,41 @@ class Batman.Controller extends Batman.Object
 
   @accessor 'controllerName', -> @_controllerName ||= helpers.underscore($functionName(@constructor).replace('Controller', ''))
 
-  @beforeFilter: (nameOrFunction) ->
-    Batman.initializeObject @
-    filters = @_batman.beforeFilters ||= []
-    filters.push(nameOrFunction) if filters.indexOf(nameOrFunction) is -1
+  @beforeFilter: (options, nameOrFunction) ->
+    if not nameOrFunction
+      nameOrFunction = options
+      options = {}
+    else
+      options.only = [options.only] if options.only and $typeOf(options.only) isnt 'Array'
+      options.except = [options.except] if options.except and $typeOf(options.except) isnt 'Array'
 
-  @afterFilter: (nameOrFunction) ->
     Batman.initializeObject @
-    filters = @_batman.afterFilters ||= []
-    filters.push(nameOrFunction) if filters.indexOf(nameOrFunction) is -1
+    options.block = nameOrFunction
+    filters = @_batman.beforeFilters ||= new Batman.Hash
+    filters.set(nameOrFunction, options)
+
+  @afterFilter: (options, nameOrFunction) ->
+    if not nameOrFunction
+      nameOrFunction = options
+      options = {}
+    else
+      options.only = [options.only] if options.only and $typeOf(options.only) isnt 'Array'
+      options.except = [options.except] if options.except and $typeOf(options.except) isnt 'Array'
+
+    Batman.initializeObject @
+    options.block = nameOrFunction
+    filters = @_batman.afterFilters ||= new Batman.Hash
+    filters.set(nameOrFunction, options)
+
+  runFilters: (params, filters) ->
+    action = params.action
+    if filters = @constructor._batman?.get(filters)
+      filters.forEach (_, options) =>
+        return if options.only and action not in options.only
+        return if options.except and action in options.except
+
+        block = options.block
+        if typeof block is 'function' then block.call(@, params) else @[block]?(params)
 
   # You shouldn't call this method directly. It will be called by the dispatcher when a route is called.
   # If you need to call a route manually, use `$redirect()`.
@@ -2089,9 +2116,7 @@ class Batman.Controller extends Batman.Object
     @set 'action', action
     @set 'params', params
 
-    if filters = @constructor._batman?.get('beforeFilters')
-      for filter in filters
-        if typeof filter is 'function' then filter.call(@, params) else @[filter](params)
+    @runFilters params, 'beforeFilters'
 
     developer.assert @[action], "Error! Controller action #{@get 'controllerName'}.#{action} couldn't be found!"
     @[action](params)
@@ -2099,9 +2124,7 @@ class Batman.Controller extends Batman.Object
     if not @_actedDuringAction
       @render()
 
-    if filters = @constructor._batman?.get('afterFilters')
-      for filter in filters
-        if typeof filter is 'function' then filter.call(@, params) else @[filter](params)
+    @runFilters params, 'afterFilters'
 
     delete @_actedDuringAction
     delete @_inAction
@@ -2274,26 +2297,20 @@ class Batman.Model extends Batman.Object
 
   # `load` fetches records from all sources possible
   @load: (options, callback) ->
-    if $typeOf(options) is 'Function'
+    if typeof options in ['function', 'undefined']
       callback = options
-      options = undefined
+      options = {}
 
     developer.assert @::_batman.getAll('storage').length, "Can't load model #{$functionName(@)} without any storage adapters!"
-    mappedRecords = new Batman.Set
-    mappedRecords.fire 'loading', options
-    @loading mappedRecords, options
 
-    @::_doStorageOperation 'readAll', options || {}, (err, records) =>
+    @loading()
+    @::_doStorageOperation 'readAll', options, (err, records) =>
       if err?
         callback?(err, [])
       else
-        mappedRecords.add(@_mapIdentity(record)) for record in records
-        mappedRecords.fire 'loaded', options
-        @loaded mappedRecords, options
-
+        mappedRecords = (@_mapIdentity(record) for record in records)
+        @loaded()
         callback?(err, mappedRecords)
-
-    mappedRecords
 
   # `create` takes an attributes hash, creates a record from it, and saves it given the callback.
   @create: (attrs, callback) ->
@@ -2617,19 +2634,21 @@ class Batman.HasOneProxy extends Batman.AssociationProxy
         loadOptions[@association.foreignKey] = id
         @association.getRelatedModel().load loadOptions, (error, loadedRecords) =>
           throw error if error
-          if !loadedRecords or loadedRecords.length < 1
+          if !loadedRecords or loadedRecords.length <= 0
             callback new Error("Couldn't find related record!"), undefined
           else
             @set('loaded', true)
-            callback undefined, loadedRecords.get('first')
+            callback undefined, loadedRecords[0]
 
-class Batman.AssociationSet extends Batman.Set
-  constructor: (@key, @association) -> super()
+class Batman.AssociationSet extends Batman.SetSort
+  constructor: (@foreignKeyValue, @association) ->
+    base = new Batman.Set
+    super(base, 'hashKey')
   loaded: false
   load: (callback) ->
-    return callback(undefined, @) unless @key?
+    return callback(undefined, @) unless @foreignKeyValue?
     loadOptions = {}
-    loadOptions[@association.foreignKey] = @key
+    loadOptions[@association.foreignKey] = @foreignKeyValue
     @association.getRelatedModel().load loadOptions, (err, records) =>
       @loaded = true unless err
       callback(err, @)
@@ -2777,7 +2796,7 @@ class Batman.PluralAssociation extends Batman.Association
 
       Batman.Property.withoutTracking =>
         if self.options.autoload and not @isNew() and not relatedRecords.loaded
-          relatedRecords.load (error) -> throw error if error
+          relatedRecords.load (error, records) -> throw error if error
 
       relatedRecords
 
@@ -2843,7 +2862,7 @@ class Batman.HasOneAssociation extends Batman.SingularAssociation
     @foreignKey = @options.foreignKey or "#{helpers.underscore($functionName(@model))}_id"
 
   apply: (baseSaveError, base) ->
-    if relation = base.constructor.defaultAccessor.get.call(base, @label)
+    if relation = @getFromAttributes(base)
       relation.set @foreignKey, base.get(@localKey)
 
   encoder: ->
@@ -2872,9 +2891,11 @@ class Batman.HasManyAssociation extends Batman.PluralAssociation
     @foreignKey = @options.foreignKey or "#{helpers.underscore($functionName(@model))}_id"
 
   apply: (baseSaveError, base) ->
-    if relations = base.constructor.defaultAccessor.get.call(base, @label)
-      relations.forEach (model) =>
-        model.set @foreignKey, base.get(@localKey)
+    unless baseSaveError
+      if relations = @getFromAttributes(base)
+        relations.forEach (model) =>
+          model.set @foreignKey, base.get(@localKey)
+      base.set @label, @setForRecord(base)
 
   encoder: ->
     association = @
@@ -2895,20 +2916,26 @@ class Batman.HasManyAssociation extends Batman.PluralAssociation
         jsonArray
 
       decode: (data, key, _, __, parentRecord) ->
-        relations = association.setForRecord(parentRecord)
         if relatedModel = association.getRelatedModel()
-          for jsonObject in data
-            record = new relatedModel
+          existingRelations = association.getFromAttributes(parentRecord) || association.setForRecord(parentRecord)
+          existingArray = existingRelations?.toArray()
+          for jsonObject, i in data
+            record = if existingArray && existingArray[i]
+              existing = true
+              existingArray[i]
+            else
+              existing = false
+              new relatedModel()
             record.fromJSON jsonObject
 
             if association.options.inverseOf
               record.set association.options.inverseOf, parentRecord
 
             record = relatedModel._mapIdentity(record)
-            relations.add record
+            existingRelations.add record
         else
           developer.error "Can't decode model #{association.options.name} because it hasn't been loaded yet!"
-        relations
+        existingRelations
     }
 
 # ### Model Associations API
@@ -3553,24 +3580,25 @@ class Batman.RenderContext
     node = node.descend(context) if context
     node
 
+  @deProxy: (object) -> if object? && object.isContextProxy then object.get('proxiedObject') else object
   constructor: (@object, @parent) ->
 
   findKey: (key) ->
     base = key.split('.')[0].split('|')[0].trim()
     currentNode = @
     while currentNode
-      if currentNode.object.get?
-        val = currentNode.object.get(base)
-      else
-        val = currentNode.object[base]
-
+      # We define the behaviour of the context stack as latching a get when the first key exists,
+      # so we need to check only if the basekey exists, not if all intermediary keys do as well.
+      val = $get(currentNode.object, base)
       if typeof val isnt 'undefined'
-        # we need to pass the check if the basekey exists, even if the intermediary keys do not.
-        return [$get(currentNode.object, key), currentNode.object]
+        val = $get(currentNode.object, key)
+        return [val, currentNode.object].map(@constructor.deProxy)
       currentNode = currentNode.parent
 
     @windowWrapper ||= window: Batman.container
     [$get(@windowWrapper, key), @windowWrapper]
+
+  get: (key) -> @findKey(key)[0]
 
   # Below are the three primitives that all the `Batman.DOM` helpers are composed of.
   # `descend` takes an `object`, and optionally a `scopedKey`. It creates a new `RenderContext` leaf node
@@ -4055,7 +4083,6 @@ class Batman.DOM.AbstractBinding extends Batman.Object
   get_dot_rx = /(?:\]\.)(.+?)(?=[\[\.]|\s*\||$)/
   get_rx = /(?!^\s*)\[(.*?)\]/g
 
-  deProxy = (object) -> if object instanceof Batman.RenderContext.ContextProxy then object.get('proxiedObject') else object
   # The `filteredValue` which calculates the final result by reducing the initial value through all the filters.
   @accessor 'filteredValue'
     get: ->
@@ -4074,13 +4101,12 @@ class Batman.DOM.AbstractBinding extends Batman.Object
 
           # Apply the filter.
           args.unshift value
-          args = args.map deProxy
           fn.apply(self.renderContext, args)
         , unfilteredValue)
         developer.currentFilterStack = null
         result
       else
-        deProxy(unfilteredValue)
+        unfilteredValue
 
     # We ignore any filters for setting, because they often aren't reversible.
     set: (_, newValue) -> @set('unfilteredValue', newValue)
@@ -4091,7 +4117,7 @@ class Batman.DOM.AbstractBinding extends Batman.Object
       # If we're working with an `@key` and not an `@value`, find the context the key belongs to so we can
       # hold a reference to it for passing to the `dataChange` and `nodeChange` observers.
       if k = @get('key')
-        @get("keyContext.#{k}")
+        Batman.RenderContext.deProxy(@get("keyContext.#{k}"))
       else
         @get('value')
     set: (_, value) ->
@@ -4378,10 +4404,7 @@ class Batman.DOM.FileBinding extends Batman.DOM.AbstractBinding
     else
       keyContext = subContext
 
-    if keyContext instanceof Batman.RenderContext.ContextProxy
-      actualObject = keyContext.get('proxiedObject')
-    else
-      actualObject = keyContext
+    actualObject = Batman.RenderContext.deProxy(keyContext)
 
     if actualObject.hasStorage && actualObject.hasStorage()
       for adapter in actualObject._batman.get('storage') when adapter instanceof Batman.RestStorage
