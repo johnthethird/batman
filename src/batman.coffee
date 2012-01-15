@@ -3535,7 +3535,7 @@ class Batman.Renderer extends Batman.Object
 
   bindingRegexp = /^data\-(.*)/
 
-  bindingSortOrder = ["renderif", "foreach", "formfor", "context", "bind"]
+  bindingSortOrder = ["renderif", "foreach", "formfor", "context", "bind", "source", "target"]
 
   bindingSortPositions = {}
   bindingSortPositions[name] = pos for name, pos in bindingSortOrder
@@ -4144,6 +4144,7 @@ class Batman.DOM.AbstractBinding extends Batman.Object
   @accessor 'keyContext', -> @renderContext.findKey(@key)[1]
 
   bindImmediately: true
+  shouldSet: true
 
   constructor: (@node, @keyPath, @renderContext, @renderer, @only = false) ->
     Batman.DOM.trackBinding(@, @node) if @node?
@@ -4154,20 +4155,31 @@ class Batman.DOM.AbstractBinding extends Batman.Object
     # Observe the node and the data.
     @bind() if @bindImmediately
 
+  isTwoWay: -> @key? && @filterFunctions.length is 0
+
   bind: ->
-    shouldSet = yes
     # Attach the observers.
     if @node? && @only in [false, 'nodeChange'] and Batman.DOM.nodeIsEditable(@node)
-      Batman.DOM.events.change @node, =>
-        shouldSet = no
-        @nodeChange?(@node, @get('keyContext') || @value)
-        shouldSet = yes
+      Batman.DOM.events.change @node, @_fireNodeChange
+
+      # Usually, we let the HTML value get updated upon binding by `observeAndFire`ing the dataChange
+      # function below. When dataChange isn't attached, we update the JS land value such that the
+      # sync between DOM and JS is maintained.
+      if @only is 'nodeChange'
+        @_fireNodeChange()
 
     # Observe the value of this binding's `filteredValue` and fire it immediately to update the node.
     if @only in [false, 'dataChange']
-      @observeAndFire 'filteredValue', (value) =>
-        if shouldSet
-          @dataChange?(value, @node)
+      @observeAndFire 'filteredValue', @_fireDataChange
+
+  _fireNodeChange: =>
+    @shouldSet = false
+    @nodeChange?(@node, @value || @get('keyContext'))
+    @shouldSet = true
+
+  _fireDataChange: (value) =>
+    if @shouldSet
+      @dataChange?(value, @node)
 
   die: ->
     @forget()
@@ -4266,7 +4278,7 @@ class Batman.DOM.AbstractCollectionBinding extends Batman.DOM.AbstractAttributeB
 
 class Batman.DOM.Binding extends Batman.DOM.AbstractBinding
   nodeChange: (node, context) ->
-    if @key && @filterFunctions.length == 0
+    if @isTwoWay()
       @set 'filteredValue', @node.value
 
   dataChange: (value, node) ->
@@ -4274,11 +4286,15 @@ class Batman.DOM.Binding extends Batman.DOM.AbstractBinding
 
 class Batman.DOM.AttributeBinding extends Batman.DOM.AbstractAttributeBinding
   dataChange: (value) -> @node.setAttribute(@attributeName, value)
-  nodeChange: (node) -> @set 'filteredValue', Batman.DOM.attrReaders._parseAttribute(node.getAttribute(@attributeName))
+  nodeChange: (node) ->
+    if @isTwoWay()
+      @set 'filteredValue', Batman.DOM.attrReaders._parseAttribute(node.getAttribute(@attributeName))
 
 class Batman.DOM.NodeAttributeBinding extends Batman.DOM.AbstractAttributeBinding
   dataChange: (value = "") -> @node[@attributeName] = value
-  nodeChange: (node) -> @set 'filteredValue', Batman.DOM.attrReaders._parseAttribute(node[@attributeName])
+  nodeChange: (node) ->
+    if @isTwoWay()
+      @set 'filteredValue', Batman.DOM.attrReaders._parseAttribute(node[@attributeName])
 
 class Batman.DOM.ShowHideBinding extends Batman.DOM.AbstractBinding
   constructor: (node, className, key, context, parentRenderer, @invert = false) ->
@@ -4359,7 +4375,7 @@ class Batman.DOM.DeferredRenderingBinding extends Batman.DOM.AbstractBinding
 
 class Batman.DOM.AddClassBinding extends Batman.DOM.AbstractAttributeBinding
   constructor: (node, className, keyPath, renderContext, renderer, only, @invert = false) ->
-    @className = className.replace(/\|/g, ' ')
+    @className = " #{className.replace(/\|/g, ' ')} "
     super
     delete @attributeName
 
@@ -4367,7 +4383,7 @@ class Batman.DOM.AddClassBinding extends Batman.DOM.AbstractAttributeBinding
     currentName = @node.className
     includesClassName = currentName.indexOf(@className) isnt -1
     if !!value is !@invert
-      @node.className = "#{currentName} #{@className}" if !includesClassName
+      @node.className = " #{currentName} #{@className} " if !includesClassName
     else
       @node.className = currentName.replace(@className, '') if includesClassName
 
@@ -4404,10 +4420,13 @@ class Batman.DOM.RadioBinding extends Batman.DOM.AbstractBinding
       @set 'filteredValue', @node.value
 
   nodeChange: (node) ->
-    @set('filteredValue', Batman.DOM.attrReaders._parseAttribute(node.value))
+    if @isTwoWay()
+      @set('filteredValue', Batman.DOM.attrReaders._parseAttribute(node.value))
 
 class Batman.DOM.FileBinding extends Batman.DOM.AbstractBinding
   nodeChange: (node, subContext) ->
+    return if !@isTwoWay()
+
     segments = @key.split('.')
     if segments.length > 1
       keyContext = subContext.get(segments.slice(0, -1).join('.'))
@@ -4470,8 +4489,9 @@ class Batman.DOM.SelectBinding extends Batman.DOM.AbstractBinding
     @updateOptionBindings()
 
   nodeChange: =>
-    @updateSelectBinding()
-    @updateOptionBindings()
+    if @isTwoWay()
+      @updateSelectBinding()
+      @updateOptionBindings()
 
   updateSelectBinding: =>
     # Gather the selected options and update the binding
@@ -4554,12 +4574,19 @@ class Batman.DOM.RouteBinding extends Batman.DOM.AbstractBinding
       @onATag = true
     super
     Batman.DOM.events.click @node, =>
-      $redirect @get('filteredValue')
+      params = @get('filteredValue')
+      $redirect params if params?
 
   dataChange: (value) ->
-    path = @set 'path', @get('dispatcher')?.pathFromParams(value)
-    if path? && @onATag
-      @node.href = Batman.navigator.linkTo path
+    if value?
+      path = @set 'path', @get('dispatcher')?.pathFromParams(value)
+
+    if @onATag
+      if path?
+        path = Batman.navigator.linkTo path
+      else
+        path = "#"
+      @node.href = path
 
 class Batman.DOM.ViewBinding extends Batman.DOM.AbstractBinding
   constructor: ->
