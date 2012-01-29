@@ -498,6 +498,8 @@ class Batman.Property
     @pushDummySourceTracker()
     try
       block()
+    catch e
+      throw e  #catch not really optional in IE
     finally
       @popSourceTracker()
   @registerSource: (obj) ->
@@ -573,6 +575,8 @@ class Batman.Property
       try
         @value = @valueFromAccessor()
         @cached = yes
+      catch e
+        throw e  #catch not really optional in IE
       finally
         @updateSourcesFromTracker()
     @value
@@ -622,6 +626,8 @@ class Batman.Property
     try
       result = block.apply(this)
       @refresh()
+    catch e
+      throw e  #catch not really optional in IE
     finally
       @constructor.popSourceTracker()
     @die() unless @isCached() or @hasObservers()
@@ -1101,6 +1107,8 @@ class Batman.Hash extends Batman.Object
     @prevent 'itemsWereRemoved'
     try
       block.call(this)
+    catch e
+      throw e  #catch not really optional in IE
     finally
       @allow 'change'
       @allow 'itemsWereAdded'
@@ -1200,6 +1208,8 @@ class Batman.SimpleSet
       @prevent?('change')
       @clear()
       @add(other.toArray()...)
+    catch e
+      throw e  #catch not really optional in IE
     finally
       @allowAndFire?('change', this, this)
   toArray: ->
