@@ -5072,8 +5072,9 @@ class Batman.DOM.IteratorBinding extends Batman.DOM.AbstractCollectionBinding
             $insertBefore @parentNode(), node, @siblingNode
 
         if addItem = node.getAttribute 'data-additem'
-          [_, context] = @renderer.context.findKey addItem
-          context?[addItem]?(item, node)
+          [f, context] = @renderer.context.findKey addItem
+          (context?[addItem] || f)?(item, node)
+
 
       @actions[options.actionNumber].item = item
     @processActionQueue()
