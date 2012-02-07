@@ -2578,7 +2578,6 @@ class Batman.Model extends Batman.Object
       record.save(callback)
     else
       foundRecord = @_mapIdentity(record)
-      foundRecord.updateAttributes(attrs)
       callback(undefined, foundRecord)
 
   @_mapIdentity: (record) ->
