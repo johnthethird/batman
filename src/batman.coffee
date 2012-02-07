@@ -4739,7 +4739,9 @@ class Batman.DOM.FileBinding extends Batman.DOM.AbstractBinding
     else
       @set 'filteredValue', node.files[0]
 
-  dataChange: (value) -> @node.value = value
+  # Causes security issue in Firefox. Remove for now. https://github.com/Shopify/batman/issues/313
+  #dataChange: (value) -> @node.value = value
+  dataChange: (value) ->
 
 class Batman.DOM.MixinBinding extends Batman.DOM.AbstractBinding
   dataChange: (value) -> $mixin @node, value if value?
