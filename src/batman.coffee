@@ -1749,10 +1749,10 @@ class Batman.Dispatcher extends Batman.Object
       argument
 
   class ControllerDirectory extends Batman.Object
-    @accessor 'app', Batman.Property.defaultAccessor
-    @accessor (key) -> @get("app.#{helpers.capitalize(key)}Controller.sharedController")
+    @accessor '__app', Batman.Property.defaultAccessor
+    @accessor (key) -> @get("__app.#{helpers.capitalize(key)}Controller.sharedController")
 
-  @accessor 'controllers', -> new ControllerDirectory(app: @get('app'))
+  @accessor 'controllers', -> new ControllerDirectory(__app: @get('app'))
 
   constructor: (app, routeMap) ->
     super({app, routeMap})
@@ -4106,7 +4106,7 @@ Batman.DOM = {
       eventNames = switch node.nodeName.toUpperCase()
         when 'TEXTAREA' then ['keyup', 'change']
         when 'INPUT'
-          if node.type.toUpperCase() is 'TEXT'
+          if node.type.toLowerCase() in Batman.DOM.textInputTypes
             oldCallback = callback
             callback = (e) ->
               return if e.type == 'keyup' && 13 <= e.keyCode <= 14
@@ -4143,6 +4143,9 @@ Batman.DOM = {
     other: (node, eventName, callback, context) -> $addEventListener node, eventName, (args...) -> callback node, args..., context
   }
 
+  # List of input type="types" for which we can use keyup events to track
+  textInputTypes: ['text', 'search', 'tel', 'url', 'email', 'password']
+
   # `yield` and `contentFor` are used to declare partial views and then pull them in elsewhere.
   # `replace` is used to replace yielded content.
   # This can be used for abstraction as well as repetition.
@@ -4158,7 +4161,7 @@ Batman.DOM = {
 
     # Clone the node if it's a child in case the parent gets cleared during the yield
     if yieldingNode and $isChildOf(yieldingNode, node)
-      node = node.cloneNode(true)
+      node = $cloneNode node
 
     yieldFn = (yieldingNode) ->
       if _replaceContent || !Batman._data(yieldingNode, 'yielded')
@@ -4247,6 +4250,30 @@ Batman.DOM = {
     $unbindNode node if unbindRoot
     $unbindTree(child) for child in node.childNodes
 
+  # Copy the event handlers from src node to dst node
+  copyNodeEventListeners: $copyNodeEventListeners = (dst, src) ->
+    if listeners = Batman._data src, 'listeners'
+      for eventName, eventListeners of listeners
+        eventListeners.forEach (listener) ->
+          $addEventListener dst, eventName, listener
+
+  # Copy all event handlers from the src tree to the dst tree.  Note that the
+  # trees must have identical structures.
+  copyTreeEventListeners: $copyTreeEventListeners = (dst, src) ->
+    $copyNodeEventListeners dst, src
+    for i in [0...src.childNodes.length]
+      $copyTreeEventListeners dst.childNodes[i], src.childNodes[i]
+
+  # Enhance the base cloneNode method to copy event handlers over to the new
+  # instance
+  cloneNode: $cloneNode = (node, deep=true) ->
+    newNode = node.cloneNode(deep)
+    if deep
+      $copyTreeEventListeners newNode, node
+    else
+      $copyNodeEventListeners newNode, node
+    newNode
+
   # Memory-safe setting of a node's innerHTML property
   setInnerHTML: $setInnerHTML = (node, html, args...) ->
     hide.apply(child, args) for child in node.childNodes when hide = Batman.data(child, 'hide')
@@ -4281,21 +4308,14 @@ Batman.DOM = {
 
   valueForNode: (node, value = '', escapeValue = true) ->
     isSetting = arguments.length > 1
-    if isSetting && escapeValue
-      value = $escapeHTML(value)
     switch node.nodeName.toUpperCase()
-      when 'INPUT'
+      when 'INPUT', 'TEXTAREA'
         if isSetting then (node.value = value) else node.value
-      when 'TEXTAREA'
-        if isSetting
-          node.innerHTML = node.value = value
-        else
-          node.innerHTML
       when 'SELECT'
-        node.value = value
+        if isSetting then node.value = value
       else
         if isSetting
-          $setInnerHTML node, value
+          $setInnerHTML node, if escapeValue then $escapeHTML(value) else value
         else node.innerHTML
 
   nodeIsEditable: (node) ->
@@ -5234,7 +5254,11 @@ filters = Batman.Filters =
     if !binding
       binding = flags
       flags = undefined
-    value.replace searchFor, replaceWith, flags
+    # Work around FF issue, "foo".replace("foo","bar",undefined) throws an error
+    if flags is undefined
+      value.replace searchFor, replaceWith
+    else
+      value.replace searchFor, replaceWith, flags
 
   downcase: buntUndefined (value) ->
     value.toLowerCase()
