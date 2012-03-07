@@ -48,7 +48,7 @@ basicSetTestSuite = ->
     equal @set.length, 1
 
   test "find(f) returns the first item for which f is true", 1, ->
-    @set.add(1, 2, 3, 4)
+    @set.add(1, 2, 3, 5)
     result = @set.find (n) -> n % 2 is 0
     equal result, 2
 
@@ -220,7 +220,7 @@ basicSetTestSuite = ->
 
   test "using .forEach() in an accessor registers the set as a source of the property", ->
     obj = new Batman.Object
-    obj.accessor 'foreach', => @set.forEach ->
+    obj.accessor 'foreach', => @set.forEach(->); []
     obj.observe 'foreach', observer = createSpy()
     @set.add('foo')
     equal observer.callCount, 1

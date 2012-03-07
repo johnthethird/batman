@@ -467,9 +467,10 @@ Batman.EventEmitter =
     if events.hasKey(key)
       existingEvent = events.get(key)
     else
-      existingEvents = @_batman.get('events')
+      @_batman.ancestors (ancestor) ->
+        existingEvent ||= ancestor._batman?.events?.get(key)
       newEvent = events.set(key, new eventClass(this, key))
-      newEvent.oneShot = existingEvents?.get(key)?.oneShot
+      newEvent.oneShot = existingEvent?.oneShot
       newEvent
   on: (key, handler) ->
     @event(key).addHandler(handler)
@@ -551,11 +552,13 @@ class Batman.Property
     @changeEvent = -> event
     event
   accessor: ->
-    keyAccessors = @base._batman?.get('keyAccessors')
-    accessor = if keyAccessors && (val = keyAccessors.get(@key))
-      val
-    else
-      @base._batman?.getFirst('defaultAccessor') or Batman.Property.defaultAccessor
+    if (_bm = @base._batman)?
+      accessor = _bm.keyAccessors?.get(@key)
+      if !accessor
+        _bm.ancestors (ancestor) =>
+          accessor ||= ancestor._batman?.keyAccessors?.get(@key)
+      accessor ||= _bm.getFirst('defaultAccessor')
+    accessor ||= Batman.Property.defaultAccessor
     @accessor = -> accessor
     accessor
   eachObserver: (iterator) ->
@@ -613,7 +616,8 @@ class Batman.Property
     @lockValue() if @value isnt undefined and @isFinal()
 
   sourceChangeHandler: ->
-    handler = => @_handleSourceChange()
+    handler = @_handleSourceChange.bind(@)
+    developer.do -> handler.property = @
     @sourceChangeHandler = -> handler
     handler
 
@@ -1020,41 +1024,74 @@ class Batman.SimpleHash
   $extendsEnumerable(@::)
   propertyClass: Batman.Property
   hasKey: (key) ->
-    if pairs = @_storage[@hashKeyFor(key)]
-      for pair in pairs
-        return true if @equality(pair[0], key)
-    return false
+    if @objectKey(key)
+      return false unless @_objectStorage
+      if pairs = @_objectStorage[@hashKeyFor(key)]
+        for pair in pairs
+          return true if @equality(pair[0], key)
+      return false
+    else
+      key = @prefixedKey(key)
+      @_storage.hasOwnProperty(key)
   get: (key) ->
-    if pairs = @_storage[@hashKeyFor(key)]
-      for pair in pairs
-        return pair[1] if @equality(pair[0], key)
+    if @objectKey(key)
+      return undefined unless @_objectStorage
+      if pairs = @_objectStorage[@hashKeyFor(key)]
+        for pair in pairs
+          return pair[1] if @equality(pair[0], key)
+    else
+      @_storage[@prefixedKey(key)]
   set: (key, val) ->
-    pairs = @_storage[@hashKeyFor(key)] ||= []
-    for pair in pairs
-      if @equality(pair[0], key)
-        return pair[1] = val
-    @length++
-    pairs.push([key, val])
-    val
+    if @objectKey(key)
+      @_objectStorage ||= {}
+      pairs = @_objectStorage[@hashKeyFor(key)] ||= []
+      for pair in pairs
+        if @equality(pair[0], key)
+          return pair[1] = val
+      @length++
+      pairs.push([key, val])
+      val
+    else
+      key = @prefixedKey(key)
+      @length++ unless @_storage[key]?
+      @_storage[key] = val
   unset: (key) ->
-    hashKey = @hashKeyFor(key)
-    if pairs = @_storage[hashKey]
-      for [obj,value], index in pairs
-        if @equality(obj, key)
-          pair = pairs.splice(index,1)
-          delete @_storage[hashKey] unless pairs.length
-          @length--
-          return pair[0][1]
+    if @objectKey(key)
+      return undefined unless @_objectStorage
+      hashKey = @hashKeyFor(key)
+      if pairs = @_objectStorage[hashKey]
+        for [obj,value], index in pairs
+          if @equality(obj, key)
+            pair = pairs.splice(index,1)
+            delete @_objectStorage[hashKey] unless pairs.length
+            @length--
+            return pair[0][1]
+    else
+      key = @prefixedKey(key)
+      val = @_storage[key]
+      if @_storage[key]?
+        @length--
+        delete @_storage[key]
+      val
   getOrSet: Batman.Observable.getOrSet
+  prefixedKey: (key) -> "_"+key
+  unprefixedKey: (key) -> key.slice(1)
   hashKeyFor: (obj) -> obj?.hashKey?() or obj
   equality: (lhs, rhs) ->
     return true if lhs is rhs
     return true if lhs isnt lhs and rhs isnt rhs # when both are NaN
     return true if lhs?.isEqual?(rhs) and rhs?.isEqual?(lhs)
     return false
+  objectKey: (key) -> typeof key isnt 'string'
   forEach: (iterator, ctx) ->
-    for key, values of @_storage
-      iterator.call(ctx, obj, value, this) for [obj, value] in values.slice()
+    results = []
+    if @_objectStorage
+      for key, values of @_objectStorage
+        for [obj, value] in values.slice()
+          results.push iterator.call(ctx, obj, value, this)
+    for key, value of @_storage
+      results.push iterator.call(ctx, @unprefixedKey(key), value, this)
+    results
   keys: ->
     result = []
     # Explicitly reference this foreach so that if it's overriden in subclasses the new implementation isn't used.
@@ -1062,6 +1099,7 @@ class Batman.SimpleHash
     result
   clear: ->
     @_storage = {}
+    delete @_objectStorage
     @length = 0
   isEmpty: ->
     @length is 0
@@ -1079,8 +1117,11 @@ class Batman.SimpleHash
     @update(object)
   toObject: ->
     obj = {}
-    for key, pair of @_storage
-      obj[key] = pair[0][1] # the first value for this key
+    for key, value of @_storage
+      obj[@unprefixedKey(key)] = value
+    if @_objectStorage
+      for key, pair of @_objectStorage
+        obj[key] = pair[0][1] # the first value for this key
     obj
   toJSON: @::toObject
 
@@ -1149,65 +1190,59 @@ class Batman.Hash extends Batman.Object
         @set(k,v)
     @fire('itemsWereAdded', addedKeys...) if addedKeys.length > 0
     @fire('itemsWereRemoved', removedKeys...) if removedKeys.length > 0
-  equality: Batman.SimpleHash::equality
-  hashKeyFor: Batman.SimpleHash::hashKeyFor
+
+  for k in ['equality', 'hashKeyFor', 'objectKey', 'prefixedKey', 'unprefixedKey']
+    @::[k] = Batman.SimpleHash::[k]
 
   for k in ['hasKey', 'forEach', 'isEmpty', 'keys', 'merge', 'toJSON', 'toObject']
-    proto = @prototype
-    do (k) ->
-      proto[k] = ->
+    do (k) =>
+      @prototype[k] = ->
         @registerAsMutableSource()
         Batman.SimpleHash::[k].apply(@, arguments)
 
 class Batman.SimpleSet
   constructor: ->
-    @_storage = new Batman.SimpleHash
-    @_indexes = new Batman.SimpleHash
-    @_uniqueIndexes = new Batman.SimpleHash
-    @_sorts = new Batman.SimpleHash
+    @_storage = []
     @length = 0
     @add.apply @, arguments if arguments.length > 0
 
   $extendsEnumerable(@::)
 
   has: (item) ->
-    @_storage.hasKey item
+    !!(~@_storage.indexOf item)
 
   add: (items...) ->
     addedItems = []
-    for item in items when !@_storage.hasKey(item)
-      @_storage.set item, true
+    for item in items when !~@_storage.indexOf item
+      @_storage.push item
       addedItems.push item
-      @length++
+    @length = @_storage.length
     if @fire and addedItems.length isnt 0
       @fire('change', this, this)
       @fire('itemsWereAdded', addedItems...)
     addedItems
   remove: (items...) ->
     removedItems = []
-    for item in items when @_storage.hasKey(item)
-      @_storage.unset item
+    for item in items when ~(index = @_storage.indexOf(item))
+      @_storage.splice(index, 1)
       removedItems.push item
-      @length--
+    @length = @_storage.length
     if @fire and removedItems.length isnt 0
       @fire('change', this, this)
       @fire('itemsWereRemoved', removedItems...)
     removedItems
-
   find: (f) ->
-    ret = undefined
-    @forEach (item) ->
-      if ret is undefined && f(item) is true
-        ret = item
-    ret
-
+    index = @_storage.indexOf(item)
+    for item in @_storage
+      return item if f(item)
+    undefined
   forEach: (iterator, ctx) ->
     container = this
-    @_storage.forEach (key) -> iterator.call(ctx, key, null, container)
+    @_storage.slice().forEach (key) -> iterator.call(ctx, key, null, container)
   isEmpty: -> @length is 0
   clear: ->
-    items = @toArray()
-    @_storage = new Batman.SimpleHash
+    items = @_storage
+    @_storage = []
     @length = 0
     if @fire and items.length isnt 0
       @fire('change', this, this)
@@ -1220,8 +1255,7 @@ class Batman.SimpleSet
       @add(other.toArray()...)
     finally
       @allowAndFire?('change', this, this)
-  toArray: ->
-    @_storage.keys()
+  toArray: -> @_storage.slice()
   merge: (others...) ->
     merged = new @constructor
     others.unshift(@)
@@ -1229,11 +1263,14 @@ class Batman.SimpleSet
       set.forEach (v) -> merged.add v
     merged
   indexedBy: (key) ->
+    @_indexes ||= new Batman.SimpleHash
     @_indexes.get(key) or @_indexes.set(key, new Batman.SetIndex(@, key))
   indexedByUnique: (key) ->
+    @_uniqueIndexes ||= new Batman.SimpleHash
     @_uniqueIndexes.get(key) or @_uniqueIndexes.set(key, new Batman.UniqueSetIndex(@, key))
   sortedBy: (key, order="asc") ->
     order = if order.toLowerCase() is "desc" then "desc" else "asc"
+    @_sorts ||= new Batman.SimpleHash
     sortsForKey = @_sorts.get(key) or @_sorts.set(key, new Batman.Object)
     sortsForKey.get(order) or sortsForKey.set(order, new Batman.SetSort(@, key, order))
 
@@ -1380,8 +1417,12 @@ class Batman.SetSort extends Batman.SetProxy
   _reIndex: ->
     newOrder = @base.toArray().sort (a,b) =>
       valueA = $get(a, @key)
+      if typeof valueA is 'function'
+        valueA = valueA.call(a)
       valueA = valueA.valueOf() if valueA?
       valueB = $get(b, @key)
+      if typeof valueB is 'function'
+        valueB = valueB.call(b)
       valueB = valueB.valueOf() if valueB?
       multiple = if @descending then -1 else 1
       @compare.call(@, valueA, valueB) * multiple
@@ -1389,6 +1430,7 @@ class Batman.SetSort extends Batman.SetProxy
     @set('_storage', newOrder)
 
 class Batman.SetIndex extends Batman.Object
+  propertyClass: Batman.Property
   constructor: (@base, @key) ->
     super()
     @_storage = new Batman.SimpleHash
@@ -2396,18 +2438,19 @@ class Batman.Controller extends Batman.Object
     return if options is false
 
     if not options.view
+      options.viewClass ||= Batman.currentApp?[helpers.camelize("#{@get('controllerName')}_#{@get('action')}_view")] || Batman.View
       options.context ||= @get('_renderContext')
       options.source ||= helpers.underscore(@get('controllerName') + '/' + @get('action'))
-      options.view = new (Batman.currentApp?[helpers.camelize("#{@get('controllerName')}_#{@get('action')}_view")] || Batman.View)(options)
+      options.view = new options.viewClass(options)
 
     if view = options.view
       Batman.currentApp?.prevent 'ready'
       view.on 'ready', =>
-        Batman.DOM.replace options.into || 'main', view.get('node'), view.hasContainer
+        yieldContainer = options.into || 'main'
+        Batman.DOM.fillYieldContainer yieldContainer, view.get('node'), true, view.hasContainer
         Batman.currentApp?.allowAndFire 'ready'
         view.ready?(@params)
     view
-
 # Models
 # ------
 
@@ -2470,7 +2513,9 @@ class Batman.Model extends Batman.Object
     decode: (x) -> x
 
   # Attach encoders and decoders for the primary key, and update them if the primary key changes.
-  @observeAndFire 'primaryKey', (newPrimaryKey) -> @encode newPrimaryKey, {encode: false, decode: @defaultEncoder.decode}
+  @observeAndFire 'primaryKey', (newPrimaryKey, oldPrimaryKey) ->
+    @encode oldPrimaryKey, {encode: false, decode: false} # Remove encoding for the previous primary key
+    @encode newPrimaryKey, {encode: false, decode: @defaultEncoder.decode}
 
   # Validations allow a model to be marked as 'valid' or 'invalid' based on a set of programmatic rules.
   # By validating our data before it gets to the server we can provide immediate feedback to the user about
@@ -2695,10 +2740,6 @@ class Batman.Model extends Batman.Object
           if typeof encodedVal isnt 'undefined'
             obj[key] = encodedVal
 
-    if @constructor.primaryKey isnt 'id'
-      obj[@constructor.primaryKey] = @get('id')
-      delete obj.id
-
     obj
 
   # `fromJSON` uses the various decoders for each key to generate a record instance from the JSON
@@ -2896,6 +2937,17 @@ class Batman.BelongsToProxy extends Batman.AssociationProxy
       throw error if error
       callback undefined, loadedRecord
 
+class Batman.PolymorphicBelongsToProxy extends Batman.BelongsToProxy
+  @accessor 'foreignTypeValue', -> @model.get(@association.foreignTypeKey)
+
+  fetchFromLocal: ->
+    @association.setIndexForType(@get('foreignTypeValue')).get(@get('foreignValue'))
+
+  fetchFromRemote: (callback) ->
+    @association.getRelatedModelForType(@get('foreignTypeValue')).find @get('foreignValue'), (error, loadedRecord) =>
+      throw error if error
+      callback undefined, loadedRecord
+
 class Batman.HasOneProxy extends Batman.AssociationProxy
   @accessor 'primaryValue', -> @model.get(@association.primaryKey)
 
@@ -2912,18 +2964,20 @@ class Batman.HasOneProxy extends Batman.AssociationProxy
         callback undefined, loadedRecords[0]
 
 class Batman.AssociationSet extends Batman.SetSort
-  constructor: (@value, @association) ->
+  constructor: (@foreignKeyValue, @association) ->
     base = new Batman.Set
     super(base, 'hashKey')
   loaded: false
   load: (callback) ->
-    return callback(undefined, @) unless @value?
-    loadOptions = {}
-    loadOptions[@association.foreignKey] = @value
-    @association.getRelatedModel().load loadOptions, (err, records) =>
+    return callback(undefined, @) unless @foreignKeyValue?
+    @association.getRelatedModel().load @_getLoadOptions(), (err, records) =>
       @loaded = true unless err
       @fire 'loaded'
       callback(err, @)
+  _getLoadOptions: ->
+    loadOptions = {}
+    loadOptions[@association.foreignKey] = @foreignKeyValue
+    loadOptions
 
 class Batman.UniqueAssociationSetIndex extends Batman.UniqueSetIndex
   constructor: (@association, key) ->
@@ -2939,6 +2993,28 @@ class Batman.AssociationSetIndex extends Batman.SetIndex
 
   _setResultSet: (key, set) ->
     @_storage.set key, set
+
+class Batman.PolymorphicUniqueAssociationSetIndex extends Batman.UniqueSetIndex
+  constructor: (@association, @type, key) ->
+    super @association.getRelatedModelForType(type).get('loaded'), key
+
+class Batman.PolymorphicAssociationSetIndex extends Batman.SetIndex
+  constructor: (@association, @type, key) ->
+    super @association.getRelatedModelForType(type).get('loaded'), key
+
+  _resultSetForKey: (key) ->
+    @_storage.getOrSet key, =>
+      new Batman.PolymorphicAssociationSet(key, @type, @association)
+
+class Batman.PolymorphicAssociationSet extends Batman.AssociationSet
+  constructor: (@foreignKeyValue, @foreignTypeKeyValue, @association) ->
+    super(@foreignKeyValue, @association)
+
+  _getLoadOptions: ->
+    loadOptions = {}
+    loadOptions[@association.foreignKey] = @foreignKeyValue
+    loadOptions[@association.foreignTypeKey] = @foreignTypeKeyValue
+    loadOptions
 
 class Batman.AssociationCurator extends Batman.SimpleHash
   @availableAssociations: ['belongsTo', 'hasOne', 'hasMany']
@@ -2969,6 +3045,7 @@ class Batman.AssociationCurator extends Batman.SimpleHash
 
 class Batman.Association
   associationType: ''
+  isPolymorphic: false
   defaultOptions:
     saveInline: true
     autoload: true
@@ -3084,7 +3161,10 @@ class Batman.BelongsToAssociation extends Batman.SingularAssociation
     saveInline: false
     autoload: true
 
-  constructor: ->
+  constructor: (model, label, options) ->
+    if options?.polymorphic
+      delete options.polymorphic
+      return new Batman.PolymorphicBelongsToAssociation(arguments...)
     super
     @foreignKey = @options.foreignKey or "#{@label}_id"
     @primaryKey = @options.primaryKey or "id"
@@ -3093,7 +3173,7 @@ class Batman.BelongsToAssociation extends Batman.SingularAssociation
   url: (recordOptions) ->
     if inverse = @inverse()
       root = Batman.helpers.pluralize(@label)
-      id = recordOptions.data?["#{@label}_id"]
+      id = recordOptions.data?[@foreignKey]
       helper = if inverse.isSingular then "singularize" else "pluralize"
       ending = Batman.helpers[helper](inverse.label)
 
@@ -3126,6 +3206,100 @@ class Batman.BelongsToAssociation extends Batman.SingularAssociation
       foreignValue = model.get(@primaryKey)
       if foreignValue isnt undefined
         base.set @foreignKey, foreignValue
+
+class Batman.PolymorphicBelongsToAssociation extends Batman.BelongsToAssociation
+  isPolymorphic: true
+  proxyClass: Batman.PolymorphicBelongsToProxy
+  constructor: ->
+    super
+    @foreignTypeKey = @options.foreignTypeKey or "#{@label}_type"
+    @model.encode @foreignTypeKey
+    @typeIndicies = {}
+
+  getRelatedModel: false
+  setIndex: false
+  inverse: false
+
+  apply: (base) ->
+    super
+    if instanceOrProxy = base.get(@label)
+      if instanceOrProxy instanceof Batman.AssociationProxy
+        model = instanceOrProxy.association.model
+      else
+        model = instanceOrProxy.constructor
+      foreignTypeValue = $functionName(model)
+      base.set @foreignTypeKey, foreignTypeValue
+
+  getAccessor: (self, model, label) ->
+    # Check whether the relation has already been set on this model
+    if recordInAttributes = self.getFromAttributes(@)
+      return recordInAttributes
+
+    # Make sure the related model has been loaded
+    if self.getRelatedModelForType(@get(self.foreignTypeKey))
+      proxy = @associationProxy(self)
+      Batman.Property.withoutTracking ->
+        if not proxy.get('loaded') and self.options.autoload
+          proxy.load()
+      proxy
+
+  url: (recordOptions) ->
+    type = recordOptions.data?[@foreignTypeKey]
+    if type && inverse = @inverseForType(type)
+      root = Batman.helpers.pluralize(type).toLowerCase()
+      id = recordOptions.data?[@foreignKey]
+      helper = if inverse.isSingular then "singularize" else "pluralize"
+      ending = Batman.helpers[helper](inverse.label)
+
+      return "/#{root}/#{id}/#{ending}"
+
+  getRelatedModelForType: (type) ->
+      scope = @options.namespace or Batman.currentApp
+      relatedModel = scope?[type]
+      developer.do ->
+        if Batman.currentApp? and not relatedModel
+          developer.warn "Related model #{modelName} for polymorhic association not found."
+      relatedModel
+
+  setIndexForType: (type) ->
+    @typeIndicies[type] ||= new Batman.PolymorphicUniqueAssociationSetIndex(@, type, @primaryKey)
+    @typeIndicies[type]
+
+  inverseForType: (type) ->
+    if relatedAssocs = @getRelatedModelForType(type)?._batman.get('associations')
+      if @options.inverseOf
+        return relatedAssocs.getByLabel(@options.inverseOf)
+
+      inverse = null
+      relatedAssocs.forEach (label, assoc) =>
+        if assoc.getRelatedModel() is @model
+          inverse = assoc
+      inverse
+
+  encoder: ->
+    association = @
+    encoder =
+      encode: false
+      decode: (data, key, response, ___, childRecord) ->
+        foreignTypeValue = response[association.foreignTypeKey] || childRecord.get(association.foreignTypeKey)
+        relatedModel = association.getRelatedModelForType(foreignTypeValue)
+        record = new relatedModel()
+        record.fromJSON(data)
+        record = relatedModel._mapIdentity(record)
+        if association.options.inverseOf
+          if inverse = association.inverseForType(foreignTypeValue)
+            if inverse instanceof Batman.PolymorphicHasManyAssociation
+              # Rely on the parent's set index to get this out.
+              childRecord.set(association.foreignKey, record.get(association.primaryKey))
+              childRecord.set(association.foreignTypeKey, foreignTypeValue)
+            else
+              record.set(inverse.label, childRecord)
+        childRecord.set(association.label, record)
+        record
+    if @options.saveInline
+      encoder.encode = (val) -> val.toJSON()
+    encoder
+
 
 class Batman.HasOneAssociation extends Batman.SingularAssociation
   associationType: 'hasOne'
@@ -3163,7 +3337,9 @@ class Batman.HasManyAssociation extends Batman.PluralAssociation
   associationType: 'hasMany'
   indexRelatedModelOn: 'foreignKey'
 
-  constructor: ->
+  constructor: (model, label, options) ->
+    if options?.as
+      return new Batman.PolymorphicHasManyAssociation(arguments...)
     super
     @primaryKey = @options.primaryKey or "id"
     @foreignKey = @options.foreignKey or "#{helpers.underscore($functionName(@model))}_id"
@@ -3216,6 +3392,51 @@ class Batman.HasManyAssociation extends Batman.PluralAssociation
         existingRelations
     }
 
+class Batman.PolymorphicHasManyAssociation extends Batman.HasManyAssociation
+  isPolymorphic: true
+  constructor: (model, label, options) ->
+    options.inverseOf = @foreignLabel = options.as
+    delete options.as
+    options.foreignKey ||= "#{@foreignLabel}_id"
+    super(model, label, options)
+    @foreignTypeKey = options.foreignTypeKey || "#{@foreignLabel}_type"
+    @model.encode @foreignTypeKey
+
+  apply: (baseSaveError, base) ->
+    unless baseSaveError
+      if relations = @getFromAttributes(base)
+        super
+        relations.forEach (model) => model.set @foreignTypeKey, @modelType()
+    true
+
+  getRelatedModelForType: -> @getRelatedModel()
+
+  modelType: -> $functionName(@model)
+
+  setIndex: ->
+    if !@typeIndex
+      @typeIndex = new Batman.PolymorphicAssociationSetIndex(@, @modelType(), @[@indexRelatedModelOn])
+    @typeIndex
+
+  encoder: ->
+    association = @
+    encoder = super
+    encoder.encode = (relationSet, _, __, record) ->
+      return if association._beingEncoded
+      association._beingEncoded = true
+
+      return unless association.options.saveInline
+      if relationSet?
+        jsonArray = []
+        relationSet.forEach (relation) ->
+          relationJSON = relation.toJSON()
+          relationJSON[association.foreignKey] = record.get(association.primaryKey)
+          relationJSON[association.foreignTypeKey] = association.modelType()
+          jsonArray.push relationJSON
+
+      delete association._beingEncoded
+      jsonArray
+    encoder
 # ### Model Associations API
 for k in Batman.AssociationCurator.availableAssociations
   do (k) =>
@@ -3280,11 +3501,19 @@ Validators = Batman.Validators = [
         errors.add key, @format(key, 'wrong_length', {count: options.length})
       callback()
 
+  class Batman.NumericValidator extends Batman.Validator
+    @options 'numeric'
+    validateEach: (errors, record, key, callback) ->
+      value = record.get(key)
+      if @options.numeric and isNaN(parseFloat(value))
+        errors.add key, @format(key, 'not_numeric')
+      callback()
+
   class Batman.PresenceValidator extends Batman.Validator
     @options 'presence'
     validateEach: (errors, record, key, callback) ->
       value = record.get(key)
-      if @options.presence and !value?
+      if @options.presence && (!value? || value is '')
         errors.add key, @format(key, 'blank')
       callback()
 ]
@@ -3297,6 +3526,7 @@ $mixin Batman.translate.messages,
       too_long: "must be less than %{count} characters"
       wrong_length: "must be %{count} characters"
       blank: "can't be blank"
+      not_numeric: "must be a number"
 
 class Batman.StorageAdapter extends Batman.Object
 
@@ -3618,7 +3848,7 @@ class Batman.RestStorage extends Batman.StorageAdapter
   @::after 'readAll', @skipIfError (env, next) ->
     if typeof env.data is 'string'
       try
-        env.data = JSON.parse(env.env)
+        env.data = JSON.parse(env.data)
       catch jsonError
         env.error = jsonError
         return next()
@@ -3759,6 +3989,11 @@ class Batman.View extends Batman.Object
       @_renderer = new Batman.Renderer(node, null, @context, @)
       @_renderer.on 'rendered', => @fire('ready', node)
 
+  @::on 'appear', -> @viewDidAppear? arguments...
+  @::on 'disappear', -> @viewDidDisappear? arguments...
+  @::on 'beforeAppear', -> @viewWillAppear? arguments...
+  @::on 'beforeDisappear', -> @viewWillDisappear? arguments...
+
 # DOM Helpers
 # -----------
 
@@ -3825,7 +4060,6 @@ class Batman.Renderer extends Batman.Object
       @resumeNode = node
       @timeout = $setImmediate @resume
       return
-
     if node.getAttribute and node.attributes
       bindings = for attr in node.attributes
         name = attr.nodeName.match(bindingRegexp)?[1]
@@ -3865,11 +4099,10 @@ class Batman.Renderer extends Batman.Object
 
     nextParent = node
     while nextParent = nextParent.parentNode
+      parentSibling = nextParent.nextSibling
       $onParseExit(nextParent).forEach (callback) -> callback()
       $forgetParseExit(nextParent)
       return if @node == nextParent
-
-      parentSibling = nextParent.nextSibling
       return parentSibling if parentSibling
 
     return
@@ -4018,17 +4251,15 @@ Batman.DOM = {
       false
 
     yield: (node, key) ->
-      $setImmediate -> Batman.DOM.yield key, node
+      $onParseExit node, -> Batman.DOM.createYieldContainer key, node
       true
     contentfor: (node, key) ->
-      $setImmediate -> Batman.DOM.contentFor key, node
+      $onParseExit node, -> Batman.DOM.fillYieldContainer key, node
       true
     replace: (node, key) ->
-      $setImmediate -> Batman.DOM.replace key, node
+      $onParseExit node, -> Batman.DOM.fillYieldContainer key, node, true
       true
   }
-  _yielders: {} # name/fn pairs of yielding functions
-  _yields: {}   # name/container pairs of yielding nodes
 
   # `Batman.DOM.attrReaders` contains all the DOM directives which take an argument in their name, in the
   # `data-dosomething-argument="keypath"` style. This means things like foreach, binding attributes like
@@ -4146,59 +4377,49 @@ Batman.DOM = {
   # List of input type="types" for which we can use keyup events to track
   textInputTypes: ['text', 'search', 'tel', 'url', 'email', 'password']
 
+  _yieldExecutors: {} # name/[fn,fn] pairs of yielding functions
+  _yieldContainers: {}   # name/container pairs of yielding nodes
+
   # `yield` and `contentFor` are used to declare partial views and then pull them in elsewhere.
   # `replace` is used to replace yielded content.
   # This can be used for abstraction as well as repetition.
-  yield: (name, node) ->
-    Batman.DOM._yields[name] = node
+  createYieldContainer: (name, node) ->
+    Batman.DOM._yieldContainers[name] = node
+    Batman.DOM._executeYield(name)
+    true
 
-    # render any content for this yield
-    if yielders = Batman.DOM._yielders[name]
-      fn(node) for fn in yielders
+  fillYieldContainer: (name, node, _replaceContent, _yieldChildren) ->
+    # Detach the node from the DOM lest it be obliterated during yield
+    node.parentNode?.removeChild(node)
 
-  contentFor: (name, node, _replaceContent, _yieldChildren) ->
-    yieldingNode = Batman.DOM._yields[name]
-
-    # Clone the node if it's a child in case the parent gets cleared during the yield
-    if yieldingNode and $isChildOf(yieldingNode, node)
-      node = $cloneNode node
-
-    yieldFn = (yieldingNode) ->
-      if _replaceContent || !Batman._data(yieldingNode, 'yielded')
-        $setInnerHTML yieldingNode, '', true
-        Batman.DOM.didRemoveNode(child) for child in yieldingNode.children
+    yieldExecutor = (destinationNode) ->
+      if _replaceContent || !Batman._data(destinationNode, 'yielded')
+        $setInnerHTML destinationNode, '', true
 
       if _yieldChildren
         while node.childNodes.length > 0
           child = node.childNodes[0]
-          view = Batman.data(child, 'view')
-          view?.viewWillAppear?(child)
-
-          $appendChild yieldingNode, node.childNodes[0], true
-
-          view?.viewDidAppear?(child)
+          $appendChild destinationNode, child, true
       else
-        view = Batman.data(node, 'view')
-        view?.viewWillAppear?(child)
-
-        $appendChild yieldingNode, node, true
-
-        view?.viewDidAppear?(child)
+        $appendChild destinationNode, node, true
 
       Batman._data node, 'yielded', true
-      Batman._data yieldingNode, 'yielded', true
-      delete Batman.DOM._yielders[name]
+      Batman._data destinationNode, 'yielded', true
+      delete Batman.DOM._yieldExecutors[name]
 
-    if contents = Batman.DOM._yielders[name]
-      contents.push yieldFn
-    else
-      Batman.DOM._yielders[name] = [yieldFn]
+    Batman.DOM._yieldExecutors[name] ||= []
+    Batman.DOM._yieldExecutors[name].push yieldExecutor
 
-    if yieldingNode
-      Batman.DOM.yield name, yieldingNode
+    Batman.DOM._executeYield(name)
+    true
 
-  replace: (name, node, _yieldChildren) ->
-    Batman.DOM.contentFor name, node, true, _yieldChildren
+  _executeYield: (name) ->
+    node = Batman.DOM._yieldContainers[name]
+    return unless node?
+    # render any content for this yield
+    if yieldExecutors = Batman.DOM._yieldExecutors[name]
+      fn(node) for fn in yieldExecutors
+    true
 
   partial: (container, path, context, renderer) ->
     renderer.prevent 'rendered'
@@ -4220,9 +4441,9 @@ Batman.DOM = {
   # it retains.
   trackBinding: $trackBinding = (binding, node) ->
     if bindings = Batman._data node, 'bindings'
-      bindings.add binding
+      bindings.push(binding)
     else
-      Batman._data node, 'bindings', new Batman.SimpleSet(binding)
+      Batman._data node, 'bindings', [binding]
 
     Batman.DOM.fire('bindingAdded', binding)
     true
@@ -4250,30 +4471,6 @@ Batman.DOM = {
     $unbindNode node if unbindRoot
     $unbindTree(child) for child in node.childNodes
 
-  # Copy the event handlers from src node to dst node
-  copyNodeEventListeners: $copyNodeEventListeners = (dst, src) ->
-    if listeners = Batman._data src, 'listeners'
-      for eventName, eventListeners of listeners
-        eventListeners.forEach (listener) ->
-          $addEventListener dst, eventName, listener
-
-  # Copy all event handlers from the src tree to the dst tree.  Note that the
-  # trees must have identical structures.
-  copyTreeEventListeners: $copyTreeEventListeners = (dst, src) ->
-    $copyNodeEventListeners dst, src
-    for i in [0...src.childNodes.length]
-      $copyTreeEventListeners dst.childNodes[i], src.childNodes[i]
-
-  # Enhance the base cloneNode method to copy event handlers over to the new
-  # instance
-  cloneNode: $cloneNode = (node, deep=true) ->
-    newNode = node.cloneNode(deep)
-    if deep
-      $copyTreeEventListeners newNode, node
-    else
-      $copyNodeEventListeners newNode, node
-    newNode
-
   # Memory-safe setting of a node's innerHTML property
   setInnerHTML: $setInnerHTML = (node, html, args...) ->
     hide.apply(child, args) for child in node.childNodes when hide = Batman.data(child, 'hide')
@@ -4293,12 +4490,12 @@ Batman.DOM = {
 
   appendChild: $appendChild = (parent, child, args...) ->
     view = Batman.data(child, 'view')
-    view?.viewWillAppear? child
+    view?.fire 'beforeAppear', child
 
     Batman.data(child, 'show')?.apply(child, args)
     parent.appendChild(child)
 
-    view?.viewDidAppear? child
+    view?.fire 'appear', child
 
   insertBefore: $insertBefore = (parentNode, newNode, referenceNode = null) ->
     if !referenceNode or parentNode.childNodes.length <= 0
@@ -4327,8 +4524,8 @@ Batman.DOM = {
     unless listeners = Batman._data node, 'listeners'
       listeners = Batman._data node, 'listeners', {}
     unless listeners[eventName]
-      listeners[eventName] = new Batman.Set
-    listeners[eventName].add callback
+      listeners[eventName] = []
+    listeners[eventName].push callback
 
     if $hasAddEventListener
       node.addEventListener eventName, callback, false
@@ -4340,7 +4537,9 @@ Batman.DOM = {
     # remove the listener from Batman.data
     if listeners = Batman._data node, 'listeners'
       if eventListeners = listeners[eventName]
-        eventListeners.remove callback
+        index = eventListeners.indexOf(callback)
+        if index != -1
+          eventListeners.splice(index, 1)
 
     if $hasAddEventListener
       node.removeEventListener eventName, callback, false
@@ -4351,16 +4550,16 @@ Batman.DOM = {
 
   didRemoveNode: (node) ->
     view = Batman.data node, 'view'
-    view?.viewWillDisappear? node
+    view?.fire 'beforeDisappear', node
 
     $unbindTree node
 
-    view?.viewDidDisappear? node
+    view?.fire 'disappear', node
 
   onParseExit: $onParseExit = (node, callback) ->
-    set = Batman._data(node, 'onParseExit') || Batman._data(node, 'onParseExit', new Batman.SimpleSet)
-    set.add callback if callback?
-    set
+    callbacks = Batman._data(node, 'onParseExit') || Batman._data(node, 'onParseExit', [])
+    callbacks.push callback if callback?
+    callbacks
 
   forgetParseExit: $forgetParseExit = (node, callback) -> Batman.removeData(node, 'onParseExit', true)
 }
@@ -4391,7 +4590,7 @@ class Batman.DOM.AbstractBinding extends Batman.Object
       (?:$|,)         # before the end of this argument in the list.
     )
     (
-      [a-zA-Z][\w\.]* # Now that true and false can't be matched, match a dot delimited list of keys.
+      [a-zA-Z][\w-\.]* # Now that true and false can't be matched, match a dot delimited list of keys.
       [\?\!]?         # Allow ? and ! at the end of a keypath to support Ruby's methods
     )
     \s*               # Be insensitive to whitespace before the next comma or end of the filter arguments list.
@@ -4626,21 +4825,21 @@ class Batman.DOM.ShowHideBinding extends Batman.DOM.AbstractBinding
   dataChange: (value) ->
     view = Batman.data @node, 'view'
     if !!value is not @invert
-      view?.viewWillAppear? @node
+      view?.fire 'beforeAppear', @node
 
       Batman.data(@node, 'show')?.call(@node)
       @node.style.display = @originalDisplay
 
-      view?.viewDidAppear? @node
+      view?.fire 'appear', @node
     else
-      view?.viewWillDisappear? @node
+      view?.fire 'beforeDisappear', @node
 
       if typeof (hide = Batman.data(@node, 'hide')) is 'function'
         hide.call @node
       else
         $setStyleProperty(@node, 'display', 'none', 'important')
 
-      view?.viewDidDisappear? @node
+      view?.fire 'disappear', @node
 
 class Batman.DOM.CheckedBinding extends Batman.DOM.NodeAttributeBinding
   isInputBinding: true
@@ -4697,17 +4896,24 @@ class Batman.DOM.DeferredRenderingBinding extends Batman.DOM.AbstractBinding
 
 class Batman.DOM.AddClassBinding extends Batman.DOM.AbstractAttributeBinding
   constructor: (node, className, keyPath, renderContext, renderer, only, @invert = false) ->
-    @className = " #{className.replace(/\|/g, ' ')} "
+    names = className.split('|')
+    @classes = for name in names
+      {
+        name: name
+        pattern: new RegExp("(?:^|\\s)#{name}(?:$|\\s)", 'i')
+      }
     super
     delete @attributeName
 
   dataChange: (value) ->
     currentName = @node.className
-    includesClassName = currentName.indexOf(@className) isnt -1
-    if !!value is !@invert
-      @node.className = " #{currentName} #{@className} " if !includesClassName
-    else
-      @node.className = currentName.replace(@className, '') if includesClassName
+    for {name, pattern} in @classes
+      includesClassName = pattern.test(currentName)
+      if !!value is !@invert
+        @node.className = "#{currentName} #{name}" if !includesClassName
+      else
+        @node.className = currentName.replace(pattern, '') if includesClassName
+    true
 
 class Batman.DOM.EventBinding extends Batman.DOM.AbstractAttributeBinding
   bindImmediately: false
@@ -4722,6 +4928,7 @@ class Batman.DOM.EventBinding extends Batman.DOM.AbstractAttributeBinding
       attacher @node, callback, context
     else
       Batman.DOM.events.other @node, @attributeName, callback, context
+    @bind()
 
   @accessor 'callbackContext', ->
     contextKeySegments = @key.split('.')
@@ -4767,10 +4974,6 @@ class Batman.DOM.FileBinding extends Batman.DOM.AbstractBinding
       @set 'filteredValue', Array::slice.call(node.files)
     else
       @set 'filteredValue', node.files[0]
-
-  # Causes security issue in Firefox. Remove for now. https://github.com/Shopify/batman/issues/313
-  #dataChange: (value) -> @node.value = value
-  dataChange: (value) ->
 
 class Batman.DOM.MixinBinding extends Batman.DOM.AbstractBinding
   dataChange: (value) -> $mixin @node, value if value?
@@ -4944,9 +5147,9 @@ class Batman.DOM.ViewBinding extends Batman.DOM.AbstractBinding
 
     @view.on 'ready', =>
       @view.awakeFromHTML? @node
-      @view.viewWillAppear? @node
+      @view.fire 'beforeAppear', @node
       @renderer.allowAndFire 'rendered'
-      @view.viewDidAppear? @node
+      @view.fire 'appear', @node
 
     @die()
 
@@ -5233,6 +5436,9 @@ filters = Batman.Filters =
   not: (value, binding) ->
     ! !!value
 
+  matches: buntUndefined (value, searchFor) ->
+    value.indexOf(searchFor) isnt -1
+
   truncate: buntUndefined (value, length, end = "...", binding) ->
     if !binding
       binding = end
@@ -5310,7 +5516,7 @@ filters = Batman.Filters =
     return if not block
     return (regularArgs...) -> block.call @, curryArgs..., regularArgs...
 
-  routeToAction: (model, action) ->
+  routeToAction: buntUndefined (model, action) ->
     params = Batman.Dispatcher.paramsFromArgument(model)
     params.action = action
     params

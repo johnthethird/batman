@@ -10,6 +10,12 @@ asyncTest 'get', 1, ->
     equals node.html(), "qux"
     QUnit.start()
 
+asyncTest 'keypaths with dashes', ->
+  context = Batman "foo-bar": "baz"
+  helpers.render '<div data-bind="foo-bar"></div>', context, (node) ->
+    equals node.html(), 'baz'
+    QUnit.start()
+
 asyncTest 'get dotted syntax', 1, ->
   context = Batman
     foo: new Batman.Hash({bar: "qux"})
@@ -128,6 +134,13 @@ asyncTest 'replace', 1, ->
     equals node.html(), "baz"
     QUnit.start()
 
+asyncTest 'contains', 1, ->
+  helpers.render '<div data-addclass-hasstring="foo | matches \'string\'"></div>',
+    foo: 'this_has_some_strings'
+  , (node) ->
+    ok node.hasClass 'hasstring'
+    QUnit.start()
+
 asyncTest 'downcase', 1, ->
   helpers.render '<div data-bind="foo | downcase"></div>',
     foo: 'BAR'
@@ -204,7 +217,7 @@ asyncTest 'map over a set', 1, ->
         comments: 20
     )
   , (node) ->
-    equals node.html(), "one, two"
+    helpers.splitAndSortedEquals node.html(), "one, two", ", "
     QUnit.start()
 
 asyncTest 'map over batman objects', 1, ->
