@@ -17,6 +17,7 @@ applyExtra = (Batman) ->
     s = []
     add = (key, value) ->
       value = value() if typeof value is 'function'
+      value = '' unless value?
       s[s.length] = encodeURIComponent(key) + "=" + encodeURIComponent(value)
 
     if Batman.typeOf(a) is 'Array'
@@ -103,7 +104,7 @@ applyExtra = (Batman) ->
     _errorsFrom422Response: (response) -> JSON.parse(response)
 
     @::before 'update', 'create', (env, next) ->
-      if @serializeAsForm && !env.options.formData
+      if @serializeAsForm && !Batman.Request.dataHasFileUploads(env.options.data)
         env.options.data = @_serializeToFormData(env.options.data)
       next()
 

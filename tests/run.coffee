@@ -1,14 +1,11 @@
 glob = require 'glob'
-fs = require 'fs'
 path = require 'path'
 # Load test runner
 qqunit = require 'qqunit'
 
-# Load jquery into window
-jquerySource = fs.readFileSync(path.join(__dirname, 'lib', 'jquery.js')).toString()
-
 qqunit.Environment.jsdom.jQueryify window, path.join(__dirname, 'lib', 'jquery.js'), (window, jQuery) ->
   global.jQuery = jQuery
+  global.File = window.File = class File
 
   # Load test helper
   Helper = require './batman/test_helper'

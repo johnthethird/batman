@@ -7,8 +7,8 @@ hte = (actual, expected) ->
     expected.toLowerCase().replace(/\n|\r/g, "")
 
 test "Batman.Renderer::_sortBindings should be consistent", ->
-  bindings = [["a"], ["foreach"], ["c"], ["bind"], ["b"], ["context"], ["f"], ["formfor"], ["d"], ["renderif"], ["e"]]
-  expectedSort = [["renderif"], ["foreach"], ["formfor"], ["context"], ["bind"], ["a"], ["b"], ["c"], ["d"], ["e"], ["f"]]
+  bindings = [["a"], ["foreach"], ["c"], ["bind"], ["b"], ["context"], ["f"], ["view"], ["g"], ["formfor"], ["d"], ["renderif"], ["e"]]
+  expectedSort = [["view"], ["renderif"], ["foreach"], ["formfor"], ["context"], ["bind"], ["a"], ["b"], ["c"], ["d"], ["e"], ["f"], ["g"]]
   deepEqual bindings.sort(Batman.Renderer::_sortBindings), expectedSort
 
 test 'it should render simple nodes', ->
@@ -190,13 +190,13 @@ asyncTest "it should ignore an inline style of 'display:none' on inline elements
         QUnit.start()
 
 asyncTest 'it should allow arbitrary attributes to be bound', 2, ->
-  source = '<div data-bind-foo="one" data-bind-bar="two" foo="before"></div>'
+  source = '<div data-bind-foo="one" data-bind-data-bar="two" foo="before"></div>'
   helpers.render source,
     one: "baz"
     two: "qux"
   , (node) ->
     equal $(node[0]).attr('foo'), "baz"
-    equal $(node[0]).attr('bar'), "qux"
+    equal $(node[0]).attr('data-bar'), "qux"
     QUnit.start()
 
 asyncTest 'it should bind undefined values as empty strings on attributes', 1, ->
@@ -369,7 +369,17 @@ unless IN_NODE # jsdom doesn't seem to like input type="file"
     helpers.render '<input type="file" data-bind="fileAttributes"></input>', false, context, (node) ->
       helpers.triggerChange(node.childNodes[0])
       delay ->
-        ok adapter.defaultRequestOptions.formData
+        strictEqual context.fileAttributes, undefined
+
+  asyncTest 'it should bind the value of file type inputs with the "multiple" flag', 2, ->
+    [context, adapter] = getMockModel()
+    ok !adapter.defaultRequestOptions.formData
+
+    helpers.render '<input type="file" data-bind="fileAttributes" multiple="multiple"></input>', false, context, (node) ->
+      helpers.triggerChange(node.childNodes[0])
+      delay ->
+        deepEqual context.fileAttributes, []
+
 
   asyncTest 'it should bind the value of file type inputs when they are proxied', 2, ->
     [context, adapter] = getMockModel()
@@ -380,7 +390,7 @@ unless IN_NODE # jsdom doesn't seem to like input type="file"
     helpers.render source, false, {proxied: context}, (node) ->
       helpers.triggerChange(node.childNodes[0].childNodes[0])
       delay ->
-        ok adapter.defaultRequestOptions.formData
+        strictEqual context.fileAttributes, undefined
 
 asyncTest 'should bind radio buttons to a value', ->
   source = '<input id="fixed" type="radio" data-bind="ad.sale_type" name="sale_type" value="fixed"/>
